@@ -32,6 +32,7 @@ from crawl4ai.extraction_strategy import (
     CosineStrategy,
     JsonCssExtractionStrategy,
 )
+import functions_framework
 
 __location__ = os.path.realpath(os.path.join(os.getcwd(), os.path.dirname(__file__)))
 
@@ -481,7 +482,69 @@ async def health_check():
         "memory_usage": memory.percent,
         "cpu_usage": psutil.cpu_percent(),
     }
+    
+@functions_framework.http
+def handle_request(request):
+    async def async_crawl():
+        # Parse the request body
+        try:
+            request_json = request.get_json()
+        except Exception:
+            return {'error': 'Invalid JSON'}, 400
 
+        try:
+            # Create CrawlRequest object
+            crawl_request = CrawlRequest(**request_json)
+            
+            # Get crawler instance
+            crawler = await crawler_service.crawler_pool.acquire(**crawl_request.crawler_params)
+            
+            try:
+                extraction_strategy = crawler_service._create_extraction_strategy(crawl_request.extraction_config)
+                
+                if isinstance(crawl_request.urls, list):
+                    results = await crawler.arun_many(
+                        urls=[str(url) for url in crawl_request.urls],
+                        extraction_strategy=extraction_strategy,
+                        js_code=crawl_request.js_code,
+                        wait_for=crawl_request.wait_for,
+                        css_selector=crawl_request.css_selector,
+                        screenshot=crawl_request.screenshot,
+                        magic=crawl_request.magic,
+                        cache_mode=crawl_request.cache_mode,
+                        session_id=crawl_request.session_id,
+                        **crawl_request.extra,
+                    )
+                    return {"results": [result.dict() for result in results]}
+                else:
+                    result = await crawler.arun(
+                        url=str(crawl_request.urls),
+                        extraction_strategy=extraction_strategy,
+                        js_code=crawl_request.js_code,
+                        wait_for=crawl_request.wait_for,
+                        css_selector=crawl_request.css_selector,
+                        screenshot=crawl_request.screenshot,
+                        magic=crawl_request.magic,
+                        cache_mode=crawl_request.cache_mode,
+                        session_id=crawl_request.session_id,
+                        **crawl_request.extra,
+                    )
+                    return {"result": result.dict()}
+            finally:
+                await crawler_service.crawler_pool.release(crawler)
+                
+        except Exception as e:
+            logger.error(f"Error in direct crawl: {str(e)}")
+            return {"error": str(e)}, 500
+
+    # Run the async function
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(async_crawl())
+    finally:
+        loop.close()
+        
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=11235)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
